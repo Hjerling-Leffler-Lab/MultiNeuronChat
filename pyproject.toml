@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multineuronchat"
+authors = [
+  { name="Gianluca Volkmer", email="gianluca.volkmer@ki.se" },
+]
+description = "MultiNeuronChat is a Python library for inferring condition‑related changes in synaptic cell‑cell communication from scRNA-/snRNA-Seq datasets in case vs control study designs."
+readme = "README.md"
+license = "GPL-3.0"
+license-files = ["LICENSE"]
+version = "2025.11.11"
+requires-python = '>=3.10'
+dependencies = [
+    "numpy==1.26.4",
+    "pandas==2.3.1",
+
+    "xarray==2025.7.1",
+    "dask==2025.7.0",
+    "netCDF4==1.7.2",
+    "bottleneck==1.5.0",
+
+    "scipy==1.16.1",
+    "matplotlib==3.10.5",
+    "seaborn==0.13.2",
+    "tqdm==4.67.1",
+    "loompy==3.0.8"
+]
+
+[tool.setuptools]
+# By default already true
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+multineuronchat = ["*.pkl"]
