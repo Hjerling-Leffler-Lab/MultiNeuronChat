@@ -12,7 +12,7 @@ From PyPI:
 pip install multineuronchat
 ```
 
-> Python ≥ 3.9 is recommended.
+> Python ≥ 3.10 is required.
 ---
 
 ## Quick start (minimal end-to-end)
