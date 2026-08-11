@@ -81,6 +81,47 @@ pvals_adj = mnc.correct_p_values(statistical_test="KS", method="by")
 ```
 
 
+## How many subjects do you need?
+
+MultiNeuronChat compares **subject-level** distributions, so the number of subjects places a hard
+floor on the smallest p-value the analysis can produce, no matter how strong the biological effect
+is. All tests offered here ask how unusual the observed control/case labelling is among all possible
+labellings, and there are only `C(n_control + n_case, n_control)` of those:
+
+```
+p_min = 2 / C(n_control + n_case, n_control)
+```
+
+Even though more cells per subject and a larger effect size increase the clarity of the signal,
+it does not affect teh minimal bound. Only more subjects can do so. Check your design before running anything:
+
+```python
+from multineuronchat import minimum_detectable_p
+
+n_control, n_case = 10, 10   # subjects per condition
+n_cell_types = 6             # cell types in your annotation
+n_interactions = 193         # 190 "human", 183 "mouse", 193 "human_extended"
+
+p_min, p_min_adj = minimum_detectable_p(
+    n_control=n_control,
+    n_case=n_case,
+    n_hypotheses=n_cell_types * n_cell_types * n_interactions,
+    method="by"              # "by" (default) or "bh"
+)
+
+print(f"Smallest attainable p-value: {p_min:.2e} -> {p_min_adj:.2e} after correction")
+# Smallest attainable p-value: 1.08e-05 -> 7.09e-01 after correction
+# => this design cannot produce a significant result at any effect size
+```
+
+Rules of thumb (balanced groups, `human_extended`):
+
+- **Below ~8 subjects per group nothing is detectable**, regardless of effect size.
+- **Do not coarsen your annotation to buy power** — going from 16 to 3 cell types buys only 3 subjects
+  per group and costs the resolution the method exists to provide.
+- **Keep groups balanced** — 10 vs 10 reaches `p_min = 1.1e-05`, but the same 20 subjects split 2 vs 18
+  reach only `1.1e-02`.
+
 ## Input data requirements
 
 For MultiNeuronChat to function, your input Loom file must meet the following criteria:

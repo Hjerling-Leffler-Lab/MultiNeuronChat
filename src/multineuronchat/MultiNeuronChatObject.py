@@ -2,6 +2,8 @@ import os
 
 import pickle
 
+import warnings
+
 import numpy as np
 import xarray as xr
 
@@ -11,6 +13,7 @@ from scipy.stats import PermutationMethod
 from .InteractionDB import InteractionDB
 
 from .utils import gene_filter_and_subject_wise_normalize_dataset
+from .power import minimum_detectable_p
 from .MultiNeuronChat import compute_avg_expression, compute_communication_score_matrix
 
 from typing import Tuple, Optional, List, Dict, Set, Any, Union
@@ -448,12 +451,52 @@ class MultiNeuronChatObject:
         )
         return float(res.pvalue)
 
+    def _warn_if_underpowered(
+            self,
+            n_hypotheses: int,
+            method: str = 'by',
+            alpha: float = 0.05
+    ) -> None:
+        """
+        Warn if the study design cannot reach significance for any effect size.
+
+        The p-values of all supported tests are counts of subject relabelings, so they cannot fall below
+        2 / C(n_control + n_case, n_control) (see power.minimum_detectable_p). If even that floor does not survive the
+        multiple-testing correction over n_hypotheses tested triples, no result of this run can be significant.
+
+        :param n_hypotheses: the number of tested hypotheses that will enter the multiple-testing correction
+        :param method: the correction method assumed for the check (default: 'by', matching correct_p_values)
+        :param alpha: the significance level assumed for the check (default: 0.05)
+        :return: None
+        """
+        n_control: int = self.communication_score_dict[self.condition_names[0]].sizes['subject']
+        n_case: int = self.communication_score_dict[self.condition_names[1]].sizes['subject']
+
+        p_min, p_min_adj = minimum_detectable_p(
+            n_control=n_control,
+            n_case=n_case,
+            n_hypotheses=n_hypotheses,
+            method=method
+        )
+
+        if p_min_adj <= alpha:
+            return
+
+        warnings.warn(
+            f'This study design cannot produce a significant result at any effect size. With {n_control} '
+            f'{self.condition_names[0]} and {n_case} {self.condition_names[1]} subjects the smallest attainable '
+            f'p-value is {p_min:.2e}, which becomes {p_min_adj:.2e} after {method.upper()} correction over '
+            f'{n_hypotheses} tested hypotheses (alpha={alpha}). This is a property of the number of subjects, not of '
+            f'the data: only additional subjects can lower this bound. See minimum_detectable_p for details.'
+        )
+
     def compute_significance(
             self,
             statistical_test: Optional[str] = 'KS',
             mask: Optional[Union[np.ndarray, xr.DataArray]] = None,
             n_resamples: Optional[int] = 10_000,
-            random_state: Optional[int] = None
+            random_state: Optional[int] = None,
+            warn_if_underpowered: Optional[bool] = True
     ) -> xr.DataArray:
         """
         Compute the p-values for the specified statistical test. The p-values are stored in the MultiNeuronChatObject.
@@ -465,12 +508,17 @@ class MultiNeuronChatObject:
         :param mask: a mask to specify for which interactions and cell-type pairs the significance should be computed.
         :param n_resamples: number of resamples for permutation fallback (default 10_000 if None)
         :param random_state: random state for reproducibility (default None)
+        :param warn_if_underpowered: whether to warn when the number of subjects is too small for any triple to reach
+                                     significance after correction (default: True)
         :return: the p-values as a DataArray.
         """
         mask = self._validate_or_make_mask(mask)
 
         if statistical_test not in ['KS', 'Anderson', 'CVM', 'MannWhitneyU']:
             raise ValueError('Statistical_test must be either "KS", "Anderson", "CVM", or "MannWhitneyU"')
+
+        if warn_if_underpowered:
+            self._warn_if_underpowered(n_hypotheses=int(np.count_nonzero(mask)))
 
         if statistical_test == 'KS':
             return self.__compute_p_values_KS(
