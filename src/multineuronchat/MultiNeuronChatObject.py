@@ -13,7 +13,7 @@ from scipy.stats import PermutationMethod
 from .InteractionDB import InteractionDB
 
 from .utils import gene_filter_and_subject_wise_normalize_dataset
-from .power import minimum_detectable_p
+from .power import minimum_detectable_p, n_relabelings, resamples_for_correction
 from .MultiNeuronChat import compute_avg_expression, compute_communication_score_matrix
 
 from typing import Tuple, Optional, List, Dict, Set, Any, Union
@@ -451,6 +451,109 @@ class MultiNeuronChatObject:
         )
         return float(res.pvalue)
 
+    @staticmethod
+    def _monte_carlo_floor(n_resamples: Optional[int]) -> Optional[float]:
+        """
+        Return the smallest p-value a permutation test with n_resamples draws can report, 1 / (n_resamples + 1).
+
+        The observed statistic is always counted among the resampled ones, so no Monte-Carlo p-value can fall below this
+        value. A returned p-value equal to it therefore carries no information beyond "smaller than the resolution of
+        this run", which is precisely the condition for escalating the triple to a deeper stage.
+
+        :param n_resamples: the number of resamples used, or None if the p-value did not come from a permutation test
+        :return: the Monte-Carlo floor, or None if n_resamples is None or not positive
+        """
+        if n_resamples is None or n_resamples < 1:
+            return None
+
+        return 1.0 / (n_resamples + 1)
+
+    @staticmethod
+    def _is_at_monte_carlo_floor(p: float, n_resamples: Optional[int]) -> bool:
+        """
+        Return True if p is exactly the Monte-Carlo floor of a run with n_resamples draws.
+
+        The comparison is deliberately made against the floor itself and never against a significance threshold: the
+        trigger for escalation must depend only on the *resolution* of the first stage, not on how significant the
+        result looks. Selecting triples for a deeper stage on the basis of their significance would condition the second
+        stage on the first stage's outcome and inflate the type-I error rate.
+
+        :param p: the p-value returned by the first stage
+        :param n_resamples: the number of resamples the first stage used
+        :return: True if p sits exactly at the floor and the triple should be escalated
+        """
+        floor: Optional[float] = MultiNeuronChatObject._monte_carlo_floor(n_resamples)
+
+        if floor is None or not np.isfinite(p):
+            return False
+
+        return bool(np.isclose(p, floor, rtol=1e-12, atol=0.0))
+
+    @staticmethod
+    def _derive_seed(
+            random_state: Optional[int],
+            source: int,
+            receiver: int,
+            interaction: int
+    ) -> Optional[int]:
+        """
+        Derive a per-triple seed for the escalation stage from the run-level random_state.
+
+        The second stage must draw *fresh* resamples: reusing the first stage's seed would reproduce the same
+        permutations and add no information. Deriving the seed from the run-level seed and the triple's position keeps
+        the whole run reproducible while making every escalated triple use a different, independent set of draws.
+
+        :param random_state: the run-level random state, or None for a non-reproducible run
+        :param source: index of the source cell type
+        :param receiver: index of the receiver cell type
+        :param interaction: index of the interaction
+        :return: the derived seed, or None if random_state is None
+        """
+        if random_state is None:
+            return None
+
+        return int(
+            np.random.SeedSequence(
+                entropy=int(random_state),
+                spawn_key=(int(source), int(receiver), int(interaction))
+            ).generate_state(1)[0]
+        )
+
+    def _resample_budget(
+            self,
+            n_hypotheses: int,
+            method: str = 'by',
+            alpha: float = 0.05
+    ) -> int:
+        """
+        Return the number of resamples the escalation stage should use for this design.
+
+        Two bounds apply. The correction sets how deep the run *needs* to go, R_min = ceil(m * c(m) / alpha), because a
+        Monte-Carlo p-value pinned at 1 / (R + 1) cannot survive correction over m hypotheses otherwise. The design sets
+        how deep it *can* usefully go, C(n_control + n_case, n_control), because that is the size of the permutation
+        reference set: at or above it SciPy enumerates every relabeling and returns the exact p-value, so further
+        resamples are strictly wasted.
+
+        Taking the minimum means small cohorts land on the exact p-value cheaply - with 6 subjects per group the whole
+        reference set has 924 elements, far fewer than the 10,000 draws a fixed budget would spend - while large cohorts
+        pay only what the correction demands.
+
+        :param n_hypotheses: number of tested hypotheses entering the multiple-testing correction
+        :param method: correction method assumed for the budget, 'by' or 'bh'
+        :param alpha: significance level assumed for the budget
+        :return: the number of resamples for the escalation stage
+        """
+        n_control: int = self.communication_score_dict[self.condition_names[0]].sizes['subject']
+        n_case: int = self.communication_score_dict[self.condition_names[1]].sizes['subject']
+
+        required: int = resamples_for_correction(
+            n_hypotheses=n_hypotheses,
+            method=method,
+            alpha=alpha
+        )
+
+        return min(required, n_relabelings(n_control=n_control, n_case=n_case))
+
     def _warn_if_underpowered(
             self,
             n_hypotheses: int,
@@ -496,7 +599,10 @@ class MultiNeuronChatObject:
             mask: Optional[Union[np.ndarray, xr.DataArray]] = None,
             n_resamples: Optional[int] = 10_000,
             random_state: Optional[int] = None,
-            warn_if_underpowered: Optional[bool] = True
+            warn_if_underpowered: Optional[bool] = True,
+            correction_method: Optional[str] = 'by',
+            alpha: Optional[float] = 0.05,
+            escalate_permutation: Optional[bool] = True
     ) -> xr.DataArray:
         """
         Compute the p-values for the specified statistical test. The p-values are stored in the MultiNeuronChatObject.
@@ -504,12 +610,26 @@ class MultiNeuronChatObject:
         the significance is only computed for the specified interactions and cell-type pairs, setting all other p-values
         to np.nan.
 
+        correction_method and alpha describe the multiple-testing correction the resulting p-values are destined for.
+        They do not apply a correction here - that remains the job of correct_p_values - but they determine how deep the
+        permutation fallback has to resample for its p-values to be able to survive that correction (see
+        power.resamples_for_correction). Both default to the values correct_p_values itself defaults to, so neither
+        needs to be provided unless a different correction is intended. If they understate the eventual correction the
+        result is conservative, never invalid: the p-values are merely resampled less deeply than they could have been.
+
         :param statistical_test: the statistical test to compute the p-values for (default: 'KS', i.e. Kolmogorov-Smirnov).
         :param mask: a mask to specify for which interactions and cell-type pairs the significance should be computed.
         :param n_resamples: number of resamples for permutation fallback (default 10_000 if None)
         :param random_state: random state for reproducibility (default None)
         :param warn_if_underpowered: whether to warn when the number of subjects is too small for any triple to reach
                                      significance after correction (default: True)
+        :param correction_method: the multiple-testing correction the p-values are intended for, 'by' or 'bh'
+                                  (default: 'by', matching correct_p_values)
+        :param alpha: the significance level the p-values are intended to be judged at (default: 0.05)
+        :param escalate_permutation: whether to re-run triples whose permutation p-value is pinned at the Monte-Carlo
+                                     floor with the deeper resample budget the correction requires (default: True).
+                                     Only affects the 'Anderson' test, the only one whose analytical p-value is clamped
+                                     and therefore always routed through the permutation fallback.
         :return: the p-values as a DataArray.
         """
         mask = self._validate_or_make_mask(mask)
@@ -517,8 +637,20 @@ class MultiNeuronChatObject:
         if statistical_test not in ['KS', 'Anderson', 'CVM', 'MannWhitneyU']:
             raise ValueError('Statistical_test must be either "KS", "Anderson", "CVM", or "MannWhitneyU"')
 
+        if correction_method not in ['by', 'bh']:
+            raise ValueError('correction_method must be either "by" or "bh"')
+
+        if not 0 < alpha <= 1:
+            raise ValueError('alpha must be in the interval (0, 1]')
+
+        n_hypotheses: int = int(np.count_nonzero(mask))
+
         if warn_if_underpowered:
-            self._warn_if_underpowered(n_hypotheses=int(np.count_nonzero(mask)))
+            self._warn_if_underpowered(
+                n_hypotheses=n_hypotheses,
+                method=correction_method,
+                alpha=alpha
+            )
 
         if statistical_test == 'KS':
             return self.__compute_p_values_KS(
@@ -530,7 +662,10 @@ class MultiNeuronChatObject:
             return self.__compute_p_values_Anderson(
                 mask=mask,
                 n_resamples=n_resamples,
-                random_state=random_state
+                random_state=random_state,
+                escalate_permutation=escalate_permutation,
+                correction_method=correction_method,
+                alpha=alpha
             )
         elif statistical_test == 'CVM':
             return self.__compute_p_values_CVM(
@@ -648,8 +783,45 @@ class MultiNeuronChatObject:
             mask: Optional[Union[np.ndarray, xr.DataArray]] = None,
             permutation_method: Optional[bool] = False,
             n_resamples: Optional[int] = 10_000,
-            random_state: Optional[int] = None
+            random_state: Optional[int] = None,
+            escalate_permutation: Optional[bool] = True,
+            correction_method: Optional[str] = 'by',
+            alpha: Optional[float] = 0.05
     ) -> xr.DataArray:
+        """
+        Compute Anderson-Darling p-values, resampling deeply enough that they can survive multiple-testing correction.
+
+        Anderson-Darling is the only supported test whose analytical p-value is clamped by SciPy (to the interval
+        [0.001, 0.25]), so every strongly separated triple is routed through the permutation fallback. That fallback
+        carries its own resolution limit of 1 / (n_resamples + 1), and at the conventional 10,000 resamples the
+        resulting 9.999e-05 cannot survive correction over a realistic number of triples - which makes exactly the
+        strongest effects unreportable. Two rules remove that limit:
+
+        1. The resample count is capped at the size of the permutation reference set, C(n_control + n_case, n_control).
+           At or above it SciPy enumerates every relabeling and returns the *exact* p-value, so small cohorts become
+           both exact and cheap rather than being sampled with a budget larger than the reference set itself.
+        2. Triples whose first-stage p-value comes back pinned at the Monte-Carlo floor are re-run once with the deeper
+           budget the correction requires (Besag & Clifford 1991). Only those triples pay the extra cost; under the null
+           the floor is essentially never reached, so the escalation rate is a fraction of a percent.
+
+        The escalation must satisfy three conditions to keep the type-I error rate valid, and all three are load-bearing:
+        it triggers only on a p-value being *exactly* at the floor (never on a significance threshold, which would
+        condition the second stage on the first stage's outcome), it draws *fresh* resamples via a derived seed, and it
+        *replaces* the first-stage p-value outright. Taking the minimum of the two stages, or pooling their counts,
+        inflates the error rate and must not be done.
+
+        Mixing resolutions across triples is safe for Benjamini-Yekutieli and Benjamini-Hochberg, which require only
+        that each p-value is super-uniform under its own null, not that all of them share a common resolution.
+
+        :param mask: a mask selecting the triples to test
+        :param permutation_method: whether to skip the analytical test and go straight to the permutation test
+        :param n_resamples: number of resamples for the first stage (default 10_000 if None)
+        :param random_state: random state for reproducibility (default None)
+        :param escalate_permutation: whether to run the second stage for floor-pinned triples (default: True)
+        :param correction_method: the correction the p-values are intended for, used to size the second stage
+        :param alpha: the significance level the p-values are intended to be judged at
+        :return: the p-values as a DataArray
+        """
         mask = self._validate_or_make_mask(mask)
 
         if permutation_method and n_resamples < 1:
@@ -662,6 +834,30 @@ class MultiNeuronChatObject:
 
         # Compute p-values where mask is True
         idx = np.where(mask)
+
+        # Rule 1: never resample beyond the permutation reference set. Both stages are capped at it, which makes the
+        # first stage already exact whenever the design is small enough for the whole reference set to be enumerated.
+        n_control: int = self.communication_score_dict[self.condition_names[0]].sizes['subject']
+        n_case: int = self.communication_score_dict[self.condition_names[1]].sizes['subject']
+        reference_set_size: int = n_relabelings(n_control=n_control, n_case=n_case)
+
+        n_resamples_stage_one: int = min(n_resamples, reference_set_size)
+
+        # Rule 2: the second stage is sized by the correction the p-values must survive, capped again at the reference
+        # set. If the first stage already enumerates the reference set its p-values are exact and nothing can be gained
+        # by escalating, so the second stage is switched off in that case.
+        n_resamples_stage_two: int = self._resample_budget(
+            n_hypotheses=int(np.count_nonzero(mask)),
+            method=correction_method,
+            alpha=alpha
+        )
+
+        escalate: bool = (
+            bool(escalate_permutation)
+            and n_resamples_stage_two > n_resamples_stage_one
+        )
+
+        n_escalated: int = 0
 
         for source, receiver, interaction in zip(*idx):
             condition_a_communication_scores, condition_b_communication_scores = self.__get_communication_scores_for_p_value_test(
@@ -684,6 +880,10 @@ class MultiNeuronChatObject:
             if len(condition_a_communication_scores) < 2 or len(condition_b_communication_scores) < 2:
                 continue
 
+            # Track whether the reported p-value came from a permutation run, and at what depth, so the escalation
+            # trigger and the zero-guard below both refer to the resolution that actually produced it.
+            n_resamples_used: Optional[int] = None
+
             # First try the default (analytical/approximate) unless permutation was explicitly requested
             if not permutation_method:
                 anderson_statistic = stats.anderson_ksamp(
@@ -701,10 +901,11 @@ class MultiNeuronChatObject:
                             condition_b_communication_scores,
                         ],
                         method=PermutationMethod(
-                            n_resamples=n_resamples,
+                            n_resamples=n_resamples_stage_one,
                             random_state=random_state
                         )
                     )
+                    n_resamples_used = n_resamples_stage_one
             else:
                 anderson_statistic = stats.anderson_ksamp(
                     samples=[
@@ -712,13 +913,52 @@ class MultiNeuronChatObject:
                         condition_b_communication_scores
                     ],
                     method=PermutationMethod(
-                        n_resamples=n_resamples,
+                        n_resamples=n_resamples_stage_one,
                         random_state=random_state
                     )
                 )
+                n_resamples_used = n_resamples_stage_one
 
-            p_values[source, receiver, interaction] = self._ensure_nonzero_p(float(anderson_statistic.pvalue), n_resamples if permutation_method else None)
+            # Second stage: this triple's p-value is pinned at the resolution of the first stage and carries no
+            # information beyond "smaller than 1 / (R + 1)". Re-run it deeply enough to survive the correction, with
+            # fresh draws from a derived seed, and replace the first-stage value outright.
+            if escalate and self._is_at_monte_carlo_floor(float(anderson_statistic.pvalue), n_resamples_used):
+                anderson_statistic = stats.anderson_ksamp(
+                    samples=[
+                        condition_a_communication_scores,
+                        condition_b_communication_scores,
+                    ],
+                    method=PermutationMethod(
+                        n_resamples=n_resamples_stage_two,
+                        random_state=self._derive_seed(
+                            random_state=random_state,
+                            source=source,
+                            receiver=receiver,
+                            interaction=interaction
+                        )
+                    )
+                )
+                n_resamples_used = n_resamples_stage_two
+                n_escalated += 1
+
+            p_values[source, receiver, interaction] = self._ensure_nonzero_p(float(anderson_statistic.pvalue), n_resamples_used)
             test_statistic[source, receiver, interaction] = float(anderson_statistic.statistic)
+
+        # If escalation was disabled or capped below what the correction needs, p-values can still be pinned at the
+        # Monte-Carlo floor. Those triples are unreportable no matter how large their effect, so say so explicitly
+        # rather than letting them silently fail the correction.
+        floor_stage_two: Optional[float] = self._monte_carlo_floor(n_resamples_stage_two if escalate else n_resamples_stage_one)
+
+        if floor_stage_two is not None and n_resamples_stage_two < reference_set_size:
+            n_at_floor: int = int(np.count_nonzero(np.isclose(p_values, floor_stage_two, rtol=1e-12, atol=0.0)))
+
+            if n_at_floor > 0:
+                warnings.warn(
+                    f'{n_at_floor} triple(s) returned a p-value pinned at the permutation resolution '
+                    f'{floor_stage_two:.2e} = 1/(n_resamples+1). Their true p-value is smaller, but cannot be resolved '
+                    f'at this resample budget, so they may fail the multiple-testing correction regardless of effect '
+                    f'size. Increase n_resamples, or enable escalate_permutation, to resolve them.'
+                )
 
         p_values_anderson_xr = xr.DataArray(
             data=p_values,

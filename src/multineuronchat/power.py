@@ -87,3 +87,72 @@ def minimum_detectable_p(
     p_min_adj: float = min(p_min * n_hypotheses * correction_factor / rank, 1.0)
 
     return p_min, p_min_adj
+
+
+def n_relabelings(
+        n_control: int,
+        n_case: int
+) -> int:
+    """
+    Return the size of the permutation reference set, C(n_control + n_case, n_control).
+
+    This is the number of distinct ways the subjects can be relabelled into the two conditions, and therefore both the
+    denominator of every exact rank-based p-value and the number of resamples above which a permutation test has nothing
+    left to sample: once n_resamples reaches this value, SciPy enumerates the complete reference set and returns the
+    exact p-value rather than a Monte-Carlo estimate of it.
+
+    :param n_control: number of subjects in the control condition (>= 1)
+    :param n_case: number of subjects in the case condition (>= 1)
+    :return: the number of relabelings, computed with exact integer arithmetic so it does not overflow
+    """
+    if n_control < 1 or n_case < 1:
+        raise ValueError('n_control and n_case must be positive integers')
+
+    return math.comb(n_control + n_case, n_control)
+
+
+def resamples_for_correction(
+        n_hypotheses: int,
+        method: Optional[str] = 'by',
+        alpha: Optional[float] = 0.05
+) -> int:
+    """
+    Compute the number of permutation resamples required for a Monte-Carlo p-value to be able to survive multiple-testing
+    correction.
+
+    A permutation p-value estimated from n_resamples draws cannot fall below 1 / (n_resamples + 1), because the observed
+    statistic is always counted among the resampled ones. After correction over n_hypotheses tests this floor becomes
+    n_hypotheses * c(n_hypotheses) / (n_resamples + 1), which must be at most alpha for any triple to be reportable.
+    Solving for the number of resamples gives
+
+        R_min = ceil(n_hypotheses * c(n_hypotheses) / alpha)
+
+    where c(m) = 1 for 'bh' and c(m) = sum_{i=1..m} 1/i for 'by'. Deriving the resample budget this way rather than
+    hardcoding it is what keeps the permutation fallback and the correction consistent: with 6 cell types and 193
+    interactions (n_hypotheses = 6,948, c = 9.42) the requirement is 1,309,490 resamples, so the conventional default of
+    10,000 is roughly 130x too small and every strongly perturbed triple is pinned at the Monte-Carlo floor.
+
+    The result is an upper bound on what is useful, not on what is affordable: it should always be capped at
+    n_relabelings(n_control, n_case), beyond which the reference set is exhausted and the p-value is exact.
+
+    :param n_hypotheses: number of tested hypotheses entering the multiple-testing correction (>= 1)
+    :param method: correction method, either 'by' (Benjamini-Yekutieli, MultiNeuronChat's default) or 'bh'
+                   (Benjamini-Hochberg)
+    :param alpha: the significance level the p-value must be able to reach after correction (default: 0.05)
+    :return: the smallest number of resamples at which the corrected Monte-Carlo floor is at most alpha
+    """
+    if method not in ['by', 'bh']:
+        raise ValueError('method must be either "by" or "bh"')
+
+    if n_hypotheses < 1:
+        raise ValueError('n_hypotheses must be a positive integer')
+
+    if not 0 < alpha <= 1:
+        raise ValueError('alpha must be in the interval (0, 1]')
+
+    if method == 'by':
+        correction_factor: float = float(np.sum(1 / np.arange(1, n_hypotheses + 1)))
+    else:
+        correction_factor: float = 1.0
+
+    return int(math.ceil(n_hypotheses * correction_factor / alpha))

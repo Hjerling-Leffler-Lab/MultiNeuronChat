@@ -122,6 +122,41 @@ Rules of thumb (balanced groups, `human_extended`):
 - **Keep groups balanced** — 10 vs 10 reaches `p_min = 1.1e-05`, but the same 20 subjects split 2 vs 18
   reach only `1.1e-02`.
 
+### Permutation depth (Anderson-Darling)
+
+A permutation p-value estimated from `n_resamples` draws can never fall below `1/(n_resamples + 1)`.
+Anderson-Darling is the only test affected by this in practice, because SciPy clamps its analytical
+p-value and every strongly separated triple is therefore routed through the permutation fallback. At
+the default 10,000 resamples the resulting `9.999e-05` cannot survive correction over a realistic
+number of triples, so the strongest effects would be exactly the ones that fail.
+
+`compute_significance` handles this automatically: triples returning a p-value pinned at that floor
+are re-run once with the depth the correction actually requires, and the resample count is capped at
+the size of the permutation reference set `C(n_control + n_case, n_control)`, at or above which the
+p-value becomes exact. Small cohorts therefore get exact p-values at *lower* cost than before.
+
+```python
+mnc.compute_significance(
+    statistical_test="Anderson",
+    mask=mask,
+    n_resamples=10_000,      # first stage
+    random_state=42,         # makes the escalation reproducible
+    correction_method="by",  # default; sizes the second stage
+    alpha=0.05,              # default; sizes the second stage
+)
+mnc.correct_p_values(statistical_test="Anderson", method="by")
+```
+
+`correction_method` and `alpha` describe the correction the p-values are *destined* for — they do not
+apply one here, that remains `correct_p_values`' job. Both default to what `correct_p_values` itself
+defaults to, so neither needs to be passed unless you intend a different correction. If they
+understate the eventual correction the result is conservative, never invalid. Set
+`escalate_permutation=False` to restore the previous single-stage behaviour; a warning will then tell
+you how many triples stayed pinned at the floor.
+
+Escalation only pays for the triples that need it — under the null the floor is essentially never
+reached, so a fraction of a percent of triples are re-run.
+
 ## Input data requirements
 
 For MultiNeuronChat to function, your input Loom file must meet the following criteria:
