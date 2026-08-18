@@ -11,7 +11,7 @@ description = "MultiNeuronChat is a Python library for inferring condition‑rel
 readme = "README.md"
 license = "GPL-3.0"
 license-files = ["LICENSE"]
-version = "2025.11.14"
+version = "2026.8.18.dev0"
 requires-python = '>=3.10'
 dependencies = [
     "numpy==1.26.4",
@@ -37,4 +37,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-multineuronchat = ["*.pkl"]
+"multineuronchat.db" = ["*.pkl"]
