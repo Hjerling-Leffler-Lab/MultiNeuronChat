@@ -283,6 +283,115 @@ def compute_variance_mask(
     return mask_xr
 
 
+def compute_abundance_mask(
+        mnc_object: MultiNeuronChatObject,
+        top_n: Optional[int] = None,
+        top_percentile: Optional[float] = None,
+        min_value: Optional[float] = None,
+        return_abundances: Optional[bool] = False
+) -> Union[xr.DataArray, Tuple[xr.DataArray, xr.DataArray]]:
+    """
+    Compute a label-blind mask that keeps the hypotheses whose bottleneck abundance is largest across subjects.
+
+    For each triple (source, receiver, interaction), the bottleneck abundance is defined as
+
+        min(pooled_mean_ligand[source, interaction], pooled_mean_target[receiver, interaction])
+
+    where the means are taken over the subjects of *both* conditions pooled together, discarding the condition labels.
+    The min is used rather than the product because the communication score is ligand × target: either factor being
+    absent makes the triple untestable regardless of how large the other is, and the product would let a large ligand
+    compensate for a near-zero target. Using the product would also make this mask near-duplicate of a variance
+    ranking (since score variance scales as (mean_ligand × mean_target)²), which would remove the point of having
+    both filters.
+
+    The filter is label-blind by the same exchangeability argument as compute_variance_mask: the pooled means are
+    symmetric functions of the pooled sample, constant on the permutation orbit of the labels, so
+
+        P(p <= u | mask selects the triple) <= u
+
+    exactly, under arbitrary dependence across triples.
+
+    Triples with a NaN pooled mean on either component (genes absent from the data, or all subjects below
+    min_n_cells_threshold for that cell type) receive a NaN bottleneck score and are never selected.
+
+    Use min_value=0.0 to drop only the triples where at least one abundance component is zero on average across all
+    pooled subjects — those are untestable and already return NaN from compute_significance, so removing them reduces
+    the multiple-testing burden for free without discarding any testable hypothesis.
+
+    See also: compute_variance_mask, compute_pooled_threshold_mask
+
+    :param mnc_object: A MultiNeuronChatObject containing the computed communication scores
+    :param top_n: The number of hypotheses with the largest bottleneck abundance to include in the mask.
+    :param top_percentile: The percentile cutoff on the bottleneck abundances; hypotheses at or above it are included.
+                           Note this is the cutoff, not the retained fraction: top_percentile=99 keeps the top 1 %.
+    :param min_value: An absolute cutoff; hypotheses with a bottleneck abundance strictly greater than min_value are
+                      included. Use min_value=0.0 to drop only the triples that have zero abundance on either side.
+    :param return_abundances: If True, the computed bottleneck abundance values are returned alongside the mask.
+    :return: A boolean xarray DataArray with dimensions 'source', 'receiver' and 'interaction', or a tuple of the
+             mask and the bottleneck abundances as xarray DataArrays
+    """
+    if mnc_object is None:
+        raise ValueError('A MultiNeuronChatObject must be provided')
+
+    if mnc_object.ligand_abundance_dict is None or mnc_object.target_abundance_dict is None:
+        raise ValueError('The MultiNeuronChatObject must contain the computed abundance scores. '
+                         'Please run compute_communication_scores() first.')
+
+    n_source_cell_types = len(mnc_object.source_cell_types)
+    n_receiver_cell_types = len(mnc_object.receiver_cell_types)
+    n_interaction_types = len(mnc_object.interaction_names)
+    n_hypotheses = n_source_cell_types * n_receiver_cell_types * n_interaction_types
+
+    _validate_selection(
+        top_n=top_n,
+        top_percentile=top_percentile,
+        min_value=min_value,
+        n_hypotheses=n_hypotheses,
+        supports_min_value=True
+    )
+
+    # Pool subjects of both conditions, discarding labels. The validity of the filter rests on this
+    # concatenation: everything below acts on the pooled sample only.
+    pooled_ligand: xr.DataArray = xr.concat(
+        [mnc_object.ligand_abundance_dict[condition] for condition in mnc_object.condition_names],
+        dim='subject'
+    )
+    pooled_target: xr.DataArray = xr.concat(
+        [mnc_object.target_abundance_dict[condition] for condition in mnc_object.condition_names],
+        dim='subject'
+    )
+
+    # Pooled mean over subjects; dims are (source, interaction) and (receiver, interaction) respectively.
+    # nanmean ignores NaNs from missing genes or cell types below min_n_cells_threshold; if every subject
+    # is NaN the result is NaN, which propagates through the min below and is never selected.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        ligand_mean: xr.DataArray = pooled_ligand.mean(dim='subject', skipna=True)
+        target_mean: xr.DataArray = pooled_target.mean(dim='subject', skipna=True)
+
+    # xarray broadcasts (source, interaction) against (receiver, interaction) by dim name, producing
+    # (source, receiver, interaction). The min is taken element-wise over the two aligned arrays.
+    bottleneck: xr.DataArray = xr.apply_ufunc(np.minimum, ligand_mean, target_mean)
+
+    bottleneck_np: np.ndarray = bottleneck.transpose(
+        'source', 'receiver', 'interaction'
+    ).to_numpy()
+
+    mask: np.ndarray = _select_top(
+        statistic=bottleneck_np,
+        top_n=top_n,
+        top_percentile=top_percentile,
+        min_value=min_value
+    )
+
+    mask_xr = _as_cube(mask, mnc_object)
+    bottleneck_xr = _as_cube(bottleneck_np, mnc_object)
+
+    if return_abundances:
+        return mask_xr, bottleneck_xr
+    return mask_xr
+
+
 def compute_threshold_communication_score_mask(
         mnc_object: MultiNeuronChatObject,
         n_samples: Optional[int] = 1,
@@ -293,11 +402,27 @@ def compute_threshold_communication_score_mask(
     higher than the threshold. The mask is returned as a xarray DataArray with dimensions 'source_cell_type',
     'receiver_cell_type', and 'interaction_type'.
 
+    .. deprecated::
+        This function checks the threshold requirement separately per condition, which means the selection depends on
+        the condition labels. A filter that reads the labels is not independent of the test statistics under the null
+        hypothesis (Bourgon, Gentleman & Huber 2010), and the same criticism that applies to
+        compute_wasserstein_mask applies here. Use compute_pooled_threshold_mask instead: it pools subjects from both
+        conditions before counting, so the selection is a symmetric function of the pooled sample and is therefore
+        exactly label-blind.
+
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param n_samples: The number of samples from each condition that must have a communication score higher than the threshold.
     :param threshold: The threshold that the communication score must exceed.
     :return: A boolean xarray DataArray with dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'
     """
+    warnings.warn(
+        'compute_threshold_communication_score_mask is deprecated: it evaluates the threshold condition separately '
+        'per condition, so the filter depends on the condition labels and is not independent of the test statistics '
+        'under the null (Bourgon, Gentleman & Huber 2010). Use compute_pooled_threshold_mask instead, which pools '
+        'subjects from both conditions before counting and is therefore exactly label-blind.',
+        DeprecationWarning,
+        stacklevel=2
+    )
 
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
@@ -335,6 +460,69 @@ def compute_threshold_communication_score_mask(
     )
 
     return mask_xr
+
+
+def compute_pooled_threshold_communication_score_mask(
+        mnc_object: MultiNeuronChatObject,
+        n_samples: Optional[int] = 1,
+        threshold: Optional[float] = 0.0,
+) -> xr.DataArray:
+    """
+    Compute a label-blind mask that keeps hypotheses where at least n_samples subjects in the pooled
+    (both-condition) sample have a communication score strictly greater than threshold.
+
+    The subjects of both conditions are pooled into a single sample before the threshold is applied,
+    so the condition labels are never read. This makes the filter a symmetric function of the pooled
+    sample, and therefore exactly independent of the test statistics under the null hypothesis: every
+    test is a function T(x, z) of the pooled scores x and the condition labels z; under the null z is
+    exchangeable given x, and a filter that depends only on x is constant on the permutation orbit, so
+
+        P(p <= u | mask selects the triple) = E[ P(p <= u | pooled order statistics) | selected ] <= u
+
+    The independence is exact rather than approximate, and it also covers joint selection across triples
+    (Bourgon, Gentleman & Huber 2010; the exchangeability argument extends to the BY correction under
+    arbitrary dependence).
+
+    Note that n_samples counts subjects in the pooled sample (sum of both conditions). To approximate
+    the old per-condition behaviour of compute_threshold_communication_score_mask at balanced designs,
+    set n_samples to twice the per-condition count used there. NaN scores (subjects below
+    min_n_cells_threshold or missing genes) are excluded from the count.
+
+    See also: compute_threshold_communication_score_mask (deprecated), compute_variance_mask
+
+    :param mnc_object: A MultiNeuronChatObject containing the computed communication scores
+    :param n_samples: The minimum number of subjects in the pooled sample that must have a communication score
+                      strictly greater than threshold for the hypothesis to be included in the mask. Default: 1.
+    :param threshold: The score threshold. A subject contributes to the count only when its score strictly exceeds
+                      this value. Default: 0.0.
+    :return: A boolean xarray DataArray with dimensions 'source', 'receiver', and 'interaction'
+    """
+    if mnc_object is None:
+        raise ValueError('A MultiNeuronChatObject must be provided')
+
+    if mnc_object.communication_score_dict is None:
+        raise ValueError('The MultiNeuronChatObject must contain the computed communication scores. '
+                         'Please run compute_communication_scores() first.')
+
+    if n_samples < 1:
+        raise ValueError('n_samples must be a positive integer')
+
+    # Pool subjects of both conditions, discarding labels. The validity of the filter rests on this
+    # concatenation: everything below acts on the pooled sample only.
+    pooled: xr.DataArray = xr.concat(
+        [mnc_object.communication_score_dict[condition] for condition in mnc_object.condition_names],
+        dim='subject'
+    )
+
+    pooled_np: np.ndarray = pooled.transpose('subject', 'source', 'receiver', 'interaction').to_numpy()
+
+    # NaN scores (missing genes, too few cells) compare as False against any threshold, so they are
+    # never counted as exceeding it. np.nansum is used for clarity.
+    above: np.ndarray = np.nansum(pooled_np > threshold, axis=0)
+
+    mask: np.ndarray = above >= n_samples
+
+    return _as_cube(mask, mnc_object)
 
 
 ########################################################################################################################
