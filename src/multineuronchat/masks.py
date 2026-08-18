@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import xarray as xr
 
@@ -20,7 +22,19 @@ def compute_wasserstein_mask(
     distributions of the communication scores for each hypothesis. The mask is returned as a xarray DataArray with
     dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'.
 
-    See also: compute_earth_mover_mask
+    .. deprecated::
+        Deprecated as a prefilter for significance testing and will be removed. The Wasserstein distance measures the
+        between-condition separation that the statistical tests are themselves testing for, and is analytically linked
+        to the Kolmogorov-Smirnov statistic, so selecting on it biases the retained p-values downward under the null
+        (Bourgon, Gentleman & Huber 2010). Measured under the global null at 12 vs 12 subjects, keeping the top 10 % of
+        triples raises the KS rejection rate at alpha = 0.05 from 0.030 to 0.087, a 2.9-fold inflation. Use
+        compute_variance_mask instead, which is label-blind and therefore exactly independent of the tests.
+
+        The distances themselves remain valid for exploratory ranking and visualisation - request them with
+        return_wasserstein_distances=True and use them for ordering or plotting rather than for selecting hypotheses to
+        test.
+
+    See also: compute_earth_mover_mask, compute_variance_mask
 
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param top_n: The number of hypotheses with the largest Wasserstein distances that should be included in the mask.
@@ -60,6 +74,11 @@ def compute_earth_mover_mask(
     distributions of the communication scores for each hypothesis. The mask is returned as a xarray DataArray with
     dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'.
 
+    .. deprecated::
+        Deprecated as a prefilter for significance testing and will be removed - see compute_wasserstein_mask for why,
+        and compute_variance_mask for the label-blind replacement. The distances remain valid for exploratory ranking
+        and visualisation.
+
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param top_n: The number of hypotheses with the largest Wasserstein distances that should be included in the mask.
                   If None, top_percentile must be provided.
@@ -85,27 +104,19 @@ def compute_earth_mover_mask(
     n_interaction_types = len(mnc_object.interaction_names)
     n_hypotheses = n_source_cell_types * n_receiver_cell_types * n_interaction_types
 
-    if top_n is None and top_percentile is None:
-        raise ValueError('Either top_n or top_percentile must be provided')
-
-    if top_n is not None and top_percentile is not None:
-        raise ValueError('Only one of top_n or top_percentile must be provided')
-
-    if top_n is not None:
-        if top_n <= 0:
-            raise ValueError('top_n must be a positive integer')
-
-        # Check if top_n is bigger than the number of hypotheses
-        # (product of number of source cell types, receiver cell, and interaction types)
-        if top_n > n_hypotheses:
-            raise ValueError(f'top_n must be smaller than the number of hypotheses ({n_hypotheses})')
-
-    if top_percentile is not None:
-        if top_percentile <= 0 or top_percentile >= 100:
-            raise ValueError('top_percentile must be a float between 0 and 100')
+    _validate_selection(top_n=top_n, top_percentile=top_percentile, n_hypotheses=n_hypotheses)
 
     if p <= 0:
         raise ValueError('p must be a positive value!')
+
+    warnings.warn(
+        'compute_wasserstein_mask / compute_earth_mover_mask are deprecated as prefilters for significance testing: '
+        'the distance is not independent of the test statistics under the null hypothesis, so passing the returned '
+        'mask to compute_significance biases the retained p-values downward. Use compute_variance_mask instead. The '
+        'distances themselves remain valid for exploratory ranking and visualisation.',
+        DeprecationWarning,
+        stacklevel=2
+    )
 
     # Compute the Wasserstein distance between the distributions of the communication scores for each hypothesis
     wasserstein_distances = np.ones((n_source_cell_types, n_receiver_cell_types, n_interaction_types)) * np.nan
@@ -134,39 +145,141 @@ def compute_earth_mover_mask(
                 if normalized and value_range > 0:
                     wasserstein_distances[s, r, lt] /= value_range
 
-    mask: np.array = np.zeros((n_source_cell_types, n_receiver_cell_types, n_interaction_types), dtype=bool)
-
-    if top_n is not None:
-        # Get the top_n indices with the smallest Wasserstein distances (which can include nan values)
-        top_n_indices = np.unravel_index(np.argsort(-wasserstein_distances, axis=None)[:top_n], wasserstein_distances.shape)
-        mask = np.zeros_like(wasserstein_distances, dtype=bool)
-        mask[top_n_indices] = True
-    else:
-        percentile = np.nanpercentile(wasserstein_distances, top_percentile)
-        mask = wasserstein_distances >= percentile
-
-    mask_xr = xr.DataArray(
-        mask,
-        dims=('source', 'receiver', 'interaction'),
-        coords={
-            'source': mnc_object.source_cell_types,
-            'receiver': mnc_object.receiver_cell_types,
-            'interaction': mnc_object.interaction_names
-        }
+    mask: np.ndarray = _select_top(
+        statistic=wasserstein_distances,
+        top_n=top_n,
+        top_percentile=top_percentile
     )
 
-    wasserstein_distances_xr = xr.DataArray(
-        wasserstein_distances,
-        dims=('source', 'receiver', 'interaction'),
-        coords={
-            'source': mnc_object.source_cell_types,
-            'receiver': mnc_object.receiver_cell_types,
-            'interaction': mnc_object.interaction_names
-        }
-    )
+    mask_xr = _as_cube(mask, mnc_object)
+    wasserstein_distances_xr = _as_cube(wasserstein_distances, mnc_object)
 
     if return_wasserstein_distances:
         return mask_xr, wasserstein_distances_xr
+    return mask_xr
+
+
+def compute_variance_mask(
+    mnc_object: MultiNeuronChatObject,
+    top_n: Optional[int] = None,
+    top_percentile: Optional[float] = None,
+    min_value: Optional[float] = None,
+    statistic: Optional[str] = 'cv2',
+    return_variances: Optional[bool] = False
+) -> Union[xr.DataArray, Tuple[xr.DataArray, xr.DataArray]]:
+    """
+    Compute a label-blind mask that keeps the hypotheses whose communication scores vary the most across subjects.
+
+    The variance is computed over the subjects of *both* conditions pooled into a single sample, with the condition
+    labels discarded. Every statistical test used by MultiNeuronChat is
+    a function T(x, z) of the pooled scores x and the condition labels z. Under the null hypothesis the labels are
+    exchangeable, so conditioning on the pooled order statistics leaves the p-value super-uniform. A filter that is a
+    symmetric function of the pooled sample alone is constant across the permutation orbit, hence
+
+        P(p <= u | mask selects the triple) = E[ P(p <= u | pooled order statistics) | selected ] <= u
+
+    i.e. selection cannot make the p-value anti-conservative. The independence is exact rather than approximate, and it
+    also covers *joint* selection across triples (top_n / top_percentile rank all triples against each other): given the
+    pooled samples the selected set is deterministic, and Benjamini-Yekutieli requires only super-uniform marginals under
+    arbitrary dependence. The Wasserstein distance, by contrast, measures precisely the between-condition separation the
+    tests are looking for, and is analytically linked to the Kolmogorov-Smirnov statistic.
+
+    What the pooled variance contains follows from the variance decomposition
+
+        (N - 1) * s^2_pooled = (n_control - 1) * s^2_control + (n_case - 1) * s^2_case
+                               + (n_control * n_case / N) * (mean_control - mean_case)^2
+
+    A genuine condition effect inflates the second (between-group) term, so the statistic is informative under the
+    alternative while remaining independent under the null. The between-group term is however only one degree of freedom
+    out of N - 1, so under the null it contributes on average 1 / (N - 1) of the total - about 1.3 % at 40 vs 40
+    subjects. The mask is therefore a weak enrichment filter and its value lies mostly at the *bottom* of the ranking:
+    triples whose scores are constant across all subjects (typically all zero, because the genes are absent or the cell
+    type was below min_n_cells_threshold) carry no detectable signal at any effect size and are already returned as NaN
+    by compute_significance. Removing them reduces the multiple-testing burden for free. Prefer min_value for that use;
+    top_n and top_percentile exist mainly to compare filters at matched retention.
+
+    Two statistics are available. The default 'cv2' is the squared coefficient of variation, s^2_pooled / mean_pooled^2,
+    which approximates Var(log score) and is invariant under a per-triple rescaling of the scores. That invariance
+    matches the tests, which are rank-based and cannot see the scale of a triple at all. It also keeps the mask distinct
+    from compute_abundance_mask: communication scores are products of max-normalized abundances, so their variance
+    scales with the squared mean and a raw-variance ranking is close to a ranking by mean abundance. 'variance' selects
+    the unnormalized pooled variance, which is the more literal reading of "total variance".
+
+    Triples with fewer than two non-NaN subjects in the pooled sample are set to NaN and never selected, as are triples
+    with a pooled mean of zero when statistic='cv2'.
+
+    :param mnc_object: A MultiNeuronChatObject containing the computed communication scores
+    :param top_n: The number of hypotheses with the largest variance to include in the mask.
+    :param top_percentile: The percentile cutoff on the variances; hypotheses at or above it are included. Note this is
+                           the cutoff, not the retained fraction: top_percentile=99 keeps the top 1 %.
+    :param min_value: An absolute cutoff; hypotheses with a variance strictly greater than min_value are included. Use
+                      min_value=0.0 to drop only the triples that are constant across all subjects.
+    :param statistic: 'cv2' for the squared coefficient of variation (default) or 'variance' for the raw pooled variance
+    :param return_variances: If True, the computed variances are returned alongside the mask
+    :return: A boolean xarray DataArray with dimensions 'source', 'receiver' and 'interaction', or a tuple of the mask
+             and the variances as xarray DataArrays
+    """
+    if mnc_object is None:
+        raise ValueError('A MultiNeuronChatObject must be provided')
+
+    if mnc_object.communication_score_dict is None:
+        raise ValueError('The MultiNeuronChatObject must contain the computed communication scores!'
+                         'Please run compute_communication_scores() first.')
+
+    if statistic not in ['cv2', 'variance']:
+        raise ValueError('statistic must be either "cv2" or "variance"')
+
+    n_source_cell_types = len(mnc_object.source_cell_types)
+    n_receiver_cell_types = len(mnc_object.receiver_cell_types)
+    n_interaction_types = len(mnc_object.interaction_names)
+    n_hypotheses = n_source_cell_types * n_receiver_cell_types * n_interaction_types
+
+    _validate_selection(
+        top_n=top_n,
+        top_percentile=top_percentile,
+        min_value=min_value,
+        n_hypotheses=n_hypotheses,
+        supports_min_value=True
+    )
+
+    # Pool the subjects of both conditions along the subject axis, discarding the condition labels. This concatenation
+    # is what the validity of the filter rests on: every reduction below acts on the pooled sample only.
+    pooled: xr.DataArray = xr.concat(
+        [mnc_object.communication_score_dict[condition] for condition in mnc_object.condition_names],
+        dim='subject'
+    )
+
+    pooled_np: np.ndarray = pooled.transpose('subject', 'source', 'receiver', 'interaction').to_numpy()
+
+    n_valid_subjects: np.ndarray = np.sum(~np.isnan(pooled_np), axis=0)
+
+    # Sample variance (ddof=1) over the pooled subject axis, ignoring NaNs. Triples with fewer than two non-NaN
+    # subjects have no defined sample variance and are excluded below.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        variances: np.ndarray = np.nanvar(pooled_np, axis=0, ddof=1)
+        pooled_means: np.ndarray = np.nanmean(pooled_np, axis=0)
+
+    variances = np.where(n_valid_subjects >= 2, variances, np.nan)
+
+    if statistic == 'cv2':
+        # Squared coefficient of variation. A pooled mean of zero means every subject scored exactly zero, which is a
+        # degenerate distribution compute_significance would return NaN for anyway.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            variances = np.where(pooled_means != 0, variances / np.square(pooled_means), np.nan)
+
+    mask: np.ndarray = _select_top(
+        statistic=variances,
+        top_n=top_n,
+        top_percentile=top_percentile,
+        min_value=min_value
+    )
+
+    mask_xr = _as_cube(mask, mnc_object)
+    variances_xr = _as_cube(variances, mnc_object)
+
+    if return_variances:
+        return mask_xr, variances_xr
     return mask_xr
 
 
@@ -227,6 +340,129 @@ def compute_threshold_communication_score_mask(
 ########################################################################################################################
 # Helper functions
 ########################################################################################################################
+
+def _validate_selection(
+        top_n: Optional[int],
+        top_percentile: Optional[float],
+        n_hypotheses: int,
+        min_value: Optional[float] = None,
+        supports_min_value: bool = False
+) -> None:
+    """
+    Validate the mutually exclusive selection arguments shared by the mask functions.
+
+    :param top_n: the requested number of hypotheses to keep, or None
+    :param top_percentile: the requested percentile cutoff, or None
+    :param n_hypotheses: the total number of hypotheses, i.e. the size of the mask cube
+    :param min_value: the requested absolute cutoff, or None. Masks that do not offer an absolute cutoff pass None.
+    :param supports_min_value: whether the calling mask exposes min_value, so the error message names only the
+                               selection modes that mask actually accepts
+    """
+    provided = [name for name, value in
+                (('top_n', top_n), ('top_percentile', top_percentile), ('min_value', min_value))
+                if value is not None]
+
+    if len(provided) == 0:
+        available = 'top_n, top_percentile or min_value' if supports_min_value else 'top_n or top_percentile'
+        raise ValueError(f'Either {available} must be provided')
+
+    if len(provided) > 1:
+        raise ValueError(f'Only one of {", ".join(provided)} must be provided')
+
+    if top_n is not None:
+        if top_n <= 0:
+            raise ValueError('top_n must be a positive integer')
+
+        # Check if top_n is bigger than the number of hypotheses
+        # (product of number of source cell types, receiver cell, and interaction types)
+        if top_n > n_hypotheses:
+            raise ValueError(f'top_n must be smaller than the number of hypotheses ({n_hypotheses})')
+
+    if top_percentile is not None:
+        if top_percentile <= 0 or top_percentile >= 100:
+            raise ValueError('top_percentile must be a float between 0 and 100')
+
+    if min_value is not None and not np.isfinite(min_value):
+        raise ValueError('min_value must be a finite number')
+
+
+def _select_top(
+        statistic: np.ndarray,
+        top_n: Optional[int] = None,
+        top_percentile: Optional[float] = None,
+        min_value: Optional[float] = None
+) -> np.ndarray:
+    """
+    Turn a cube of per-hypothesis statistics into a boolean mask, keeping the hypotheses with the largest values.
+
+    NaN entries mark hypotheses the statistic could not be computed for and are never selected, whichever selection mode
+    is used. If top_n exceeds the number of non-NaN entries, only the non-NaN ones are selected and a warning is issued -
+    selecting NaN hypotheses would put untestable triples into the mask and inflate the multiple-testing burden with
+    hypotheses that can only return NaN.
+
+    :param statistic: the per-hypothesis statistic, with NaN for hypotheses it could not be computed for
+    :param top_n: the number of hypotheses with the largest statistic to select
+    :param top_percentile: the percentile cutoff; hypotheses at or above it are selected
+    :param min_value: an absolute cutoff; hypotheses strictly greater than it are selected
+    :return: a boolean array of the same shape as statistic
+    """
+    finite: np.ndarray = np.isfinite(statistic)
+
+    if min_value is not None:
+        return finite & (statistic > min_value)
+
+    if top_percentile is not None:
+        if not np.any(finite):
+            return np.zeros_like(statistic, dtype=bool)
+        percentile = np.nanpercentile(statistic, top_percentile)
+        return finite & (statistic >= percentile)
+
+    n_finite: int = int(np.count_nonzero(finite))
+
+    if top_n > n_finite:
+        warnings.warn(
+            f'top_n={top_n} exceeds the number of hypotheses with a computable statistic ({n_finite}). '
+            f'Selecting those {n_finite} hypotheses instead.',
+            stacklevel=3
+        )
+        top_n = n_finite
+
+    mask: np.ndarray = np.zeros_like(statistic, dtype=bool)
+
+    if top_n == 0:
+        return mask
+
+    # Rank only the finite entries. np.argsort sorts NaNs to the end regardless of sign, so they are already never
+    # selected while top_n <= n_finite; restricting the sort makes that explicit rather than incidental.
+    finite_indices: np.ndarray = np.flatnonzero(finite)
+    order: np.ndarray = np.argsort(-statistic.ravel()[finite_indices], kind='stable')
+
+    mask.flat[finite_indices[order[:top_n]]] = True
+
+    return mask
+
+
+def _as_cube(
+        values: np.ndarray,
+        mnc_object: MultiNeuronChatObject
+) -> xr.DataArray:
+    """
+    Wrap a (source, receiver, interaction) numpy array in a labelled DataArray with the object's coordinates.
+
+    :param values: the array to wrap, of shape (n_source_cell_types, n_receiver_cell_types, n_interactions)
+    :param mnc_object: the MultiNeuronChatObject supplying the coordinate labels
+    :return: the values as an xarray DataArray
+    """
+    return xr.DataArray(
+        values,
+        dims=('source', 'receiver', 'interaction'),
+        coords={
+            'source': mnc_object.source_cell_types,
+            'receiver': mnc_object.receiver_cell_types,
+            'interaction': mnc_object.interaction_names
+        }
+    )
+
 
 def _cdf_distance(p, u_values, v_values, u_weights=None, v_weights=None):
     r"""

@@ -60,9 +60,17 @@ mnc.compute_communication_scores(
     verbose=True
 )
 
-# 3) (Optional) Focus hypotheses with masks (Wasserstein / EMD)
-from multineuronchat.masks import compute_wasserstein_mask
-mask = compute_wasserstein_mask(mnc, top_percentile=99.0)
+# 3) (Optional) Focus hypotheses with a mask to reduce the multiple-testing burden.
+# compute_variance_mask ranks triples by the variance of their communication scores across the subjects of both
+# conditions pooled together. Because it never looks at the condition labels it is exactly independent of the
+# statistical tests under the null hypothesis, which is what makes it a valid prefilter.
+from multineuronchat.masks import compute_variance_mask
+
+# Drop only the triples that are constant across every subject and therefore cannot be detected at any effect size
+mask = compute_variance_mask(mnc, min_value=0.0)
+
+# ...or keep the top 1% most variable triples
+mask = compute_variance_mask(mnc, top_percentile=99.0)
 
 # 4) Significance testing and multiple testing correction
 pvals = mnc.compute_significance(
