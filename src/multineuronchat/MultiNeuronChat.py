@@ -177,7 +177,7 @@ def compute_avg_expression(
 
     with loompy.connect(path_to_loom, mode='r') as data_loom:
         # containing all subjects regardless of the conditon label that were provided
-        all_subjects: List[str] = list(set(data_loom.ca[subject_label_column]))
+        all_subjects: List[str] = sorted(set(data_loom.ca[subject_label_column]))
 
         # Create a dictionary of all subjects to their condition
         # Important: we only keep those subjects that have either condition_label_a or condition_label_b

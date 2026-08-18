@@ -652,6 +652,24 @@ class MultiNeuronChatObject:
                 alpha=alpha
             )
 
+        if random_state is None:
+            if statistical_test == 'Anderson':
+                warnings.warn(
+                    'random_state=None: Anderson-Darling always uses the permutation fallback, '
+                    'so results will not be reproducible across runs. '
+                    'Pass an integer to random_state for reproducible results.',
+                    UserWarning,
+                    stacklevel=2
+                )
+            else:
+                warnings.warn(
+                    f'random_state=None: if {statistical_test} falls back to a permutation test '
+                    'for any triple, those p-values will not be reproducible across runs. '
+                    'Pass an integer to random_state for reproducible results.',
+                    UserWarning,
+                    stacklevel=2
+                )
+
         if statistical_test == 'KS':
             return self.__compute_p_values_KS(
                 mask=mask,
@@ -697,6 +715,7 @@ class MultiNeuronChatObject:
 
         # Compute p-values where mask is True
         idx = np.where(mask)
+        _permutation_fallback_warned = False
 
         for source, receiver, interaction in zip(*idx):
             condition_a_communication_scores, condition_b_communication_scores = self.__get_communication_scores_for_p_value_test(
@@ -729,6 +748,14 @@ class MultiNeuronChatObject:
 
             p = float(ks_statistic.pvalue)
             if self._needs_permutation(p):
+                if random_state is None and not _permutation_fallback_warned:
+                    warnings.warn(
+                        'KS permutation fallback triggered: p-values for affected triples are not '
+                        'reproducible. Pass an integer to random_state to fix this.',
+                        UserWarning,
+                        stacklevel=5
+                    )
+                    _permutation_fallback_warned = True
                 p_perm = self.__perm_pvalue_independent(
                     condition_a_communication_scores,
                     condition_b_communication_scores,
@@ -999,6 +1026,7 @@ class MultiNeuronChatObject:
 
         # Compute p-values where mask is True
         idx = np.where(mask)
+        _permutation_fallback_warned = False
 
         for source, receiver, interaction in zip(*idx):
             condition_a_communication_scores, condition_b_communication_scores = self.__get_communication_scores_for_p_value_test(
@@ -1028,6 +1056,14 @@ class MultiNeuronChatObject:
             # Fallback criteria: exact zero, non-finite, or suspiciously tiny asymptotic p (underflow)
             p = float(cvm_statistic.pvalue)
             if self._needs_permutation(p):
+                if random_state is None and not _permutation_fallback_warned:
+                    warnings.warn(
+                        'CVM permutation fallback triggered: p-values for affected triples are not '
+                        'reproducible. Pass an integer to random_state to fix this.',
+                        UserWarning,
+                        stacklevel=5
+                    )
+                    _permutation_fallback_warned = True
                 # Use permutation p-value with the same statistic definition
                 p_perm = self.__perm_pvalue_independent(
                     condition_a_communication_scores,
@@ -1080,6 +1116,7 @@ class MultiNeuronChatObject:
 
         # Compute p-values where mask is True
         idx = np.where(mask)
+        _permutation_fallback_warned = False
 
         for source, receiver, interaction in zip(*idx):
             condition_a_communication_scores, condition_b_communication_scores = self.__get_communication_scores_for_p_value_test(
@@ -1104,6 +1141,14 @@ class MultiNeuronChatObject:
             test_statistic[source, receiver, interaction] = float(mannwhitneyu_statistic.statistic)
 
             if self._needs_permutation(p):
+                if random_state is None and not _permutation_fallback_warned:
+                    warnings.warn(
+                        'MannWhitneyU permutation fallback triggered: p-values for affected triples are not '
+                        'reproducible. Pass an integer to random_state to fix this.',
+                        UserWarning,
+                        stacklevel=5
+                    )
+                    _permutation_fallback_warned = True
                 res_perm = stats.mannwhitneyu(
                     x=condition_a_communication_scores,
                     y=condition_b_communication_scores,
