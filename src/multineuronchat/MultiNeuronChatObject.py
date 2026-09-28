@@ -1,3 +1,4 @@
+import math
 import os
 
 import pickle
@@ -341,7 +342,9 @@ class MultiNeuronChatObject:
     def correct_p_values(
             self,
             statistical_test: Optional[Union[str, List[str]]] = None,
-            method: str = 'by'
+            method: str = 'by',
+            alpha: float = 0.05,
+            warn_if_underpowered: bool = True
     ) -> Union[xr.DataArray, Dict[str, xr.DataArray]]:
         """
         This function corrects the p-values using the Benjamini-Yekutieli method. The corrected p-values are stored in
@@ -351,8 +354,15 @@ class MultiNeuronChatObject:
 
         :param statistical_test: the test for which the p-values should be corrected
         :param method: the method to use for correction (default: 'by')
+        :param alpha: the significance level assumed by the power check; it does not threshold the output (default: 0.05)
+        :param warn_if_underpowered: whether to warn, per test, when the number of subjects is too small for an isolated
+                                     triple to reach significance over the triples that returned a p-value. Unlike the
+                                     check in compute_significance this uses the final hypothesis count (default: True)
         :return: the corrected p-values as a DataArray or a dictionary of DataArrays
         """
+        if not 0 < alpha <= 1:
+            raise ValueError('alpha must be in the interval (0, 1]')
+
         if statistical_test is None or isinstance(statistical_test, list):
             # compute significance for all tests that have been computed or the specific list of tests
             if statistical_test is None:
@@ -367,6 +377,14 @@ class MultiNeuronChatObject:
 
             for test in statistical_test:
                 p_values = self.p_values[test].values
+
+                if warn_if_underpowered:
+                    self._warn_if_underpowered(
+                        n_hypotheses=int(np.count_nonzero(~np.isnan(p_values))),
+                        method=method,
+                        alpha=alpha
+                    )
+
                 p_values_adj = self.__correct_p_values(
                     p_values,
                     method=method
@@ -391,6 +409,14 @@ class MultiNeuronChatObject:
                 raise ValueError(f'Test {statistical_test} has not been computed yet')
 
             p_values = self.p_values[statistical_test].values
+
+            if warn_if_underpowered:
+                self._warn_if_underpowered(
+                    n_hypotheses=int(np.count_nonzero(~np.isnan(p_values))),
+                    method=method,
+                    alpha=alpha
+                )
+
             p_values_adj = self.__correct_p_values(
                 p_values,
                 method=method
@@ -558,23 +584,40 @@ class MultiNeuronChatObject:
             self,
             n_hypotheses: int,
             method: str = 'by',
-            alpha: float = 0.05
+            alpha: float = 0.05,
+            counted_before_testing: bool = False
     ) -> None:
         """
-        Warn if the study design cannot reach significance for any effect size.
+        Warn if the study design limits which results can reach significance.
 
         The p-values of all supported tests are counts of subject relabelings, so they cannot fall below
-        2 / C(n_control + n_case, n_control) (see power.minimum_detectable_p). If even that floor does not survive the
-        multiple-testing correction over n_hypotheses tested triples, no result of this run can be significant.
+        p_min = 2 / C(n_control + n_case, n_control) (see power.minimum_detectable_p). BH and BY are step-up procedures:
+        they reject the k smallest p-values for the largest k with p_(k) <= k * alpha / (m * c(m)). Because every p_(k) is
+        at least p_min, a rejection at rank k requires k >= k_min = ceil(p_min * m * c(m) / alpha). Two regimes follow:
 
-        :param n_hypotheses: the number of tested hypotheses that will enter the multiple-testing correction
+        - k_min > m, i.e. p_min * c(m) > alpha: even if every tested triple attained the floor, none would survive the
+          correction, so no result can be significant.
+        - 1 < k_min <= m: a single, isolated signal cannot be significant, but significant triples can still occur as a
+          group of at least k_min, e.g. k_min triples that separate the conditions perfectly and tie at p_min.
+
+        Both statements are arithmetic on the correction and hold under any dependence between the triples.
+
+        :param n_hypotheses: the number of hypotheses m entering the multiple-testing correction
         :param method: the correction method assumed for the check (default: 'by', matching correct_p_values)
         :param alpha: the significance level assumed for the check (default: 0.05)
+        :param counted_before_testing: True if n_hypotheses counts the triples selected for testing rather than those
+                                       that returned a p-value. Triples returning NaN do not enter the correction and
+                                       lower the bound, so the warning is then worded as conditional on all of them
+                                       yielding a p-value (default: False)
         :return: None
         """
+        if n_hypotheses < 1:
+            return
+
         n_control: int = self.communication_score_dict[self.condition_names[0]].sizes['subject']
         n_case: int = self.communication_score_dict[self.condition_names[1]].sizes['subject']
 
+        # A lone triple at the floor: the rank-1 step of the correction.
         p_min, p_min_adj = minimum_detectable_p(
             n_control=n_control,
             n_case=n_case,
@@ -585,12 +628,50 @@ class MultiNeuronChatObject:
         if p_min_adj <= alpha:
             return
 
+        # All tested triples at the floor: the most favourable case the step-up procedure allows, p_min * c(m).
+        _, p_floor_all = minimum_detectable_p(
+            n_control=n_control,
+            n_case=n_case,
+            n_hypotheses=n_hypotheses,
+            method=method,
+            rank=n_hypotheses
+        )
+
+        design: str = (
+            f'With {n_control} {self.condition_names[0]} and {n_case} {self.condition_names[1]} subjects the smallest '
+            f'attainable p-value is {p_min:.2e}'
+        )
+
+        if counted_before_testing:
+            scope: str = f'if all {n_hypotheses} tested triples yield a p-value'
+            caveat: str = (
+                ' Triples that return NaN do not enter the correction and relax this bound; correct_p_values repeats the '
+                'check on the final count.'
+            )
+        else:
+            scope: str = f'over the {n_hypotheses} triples with a p-value'
+            caveat: str = ''
+
+        if p_floor_all > alpha:
+            warnings.warn(
+                f'This study design cannot produce a significant result at any effect size {scope}. {design}; even if '
+                f'all {n_hypotheses} triples attained it, {method.upper()} correction would raise it to '
+                f'{p_floor_all:.2e} (alpha={alpha}). This is a property of the number of subjects, not of the data: only '
+                f'additional subjects or fewer tested hypotheses can lower this bound.{caveat} See minimum_detectable_p '
+                f'for details.',
+                stacklevel=3
+            )
+            return
+
+        k_min: int = math.ceil(p_floor_all * n_hypotheses / alpha)
+
         warnings.warn(
-            f'This study design cannot produce a significant result at any effect size. With {n_control} '
-            f'{self.condition_names[0]} and {n_case} {self.condition_names[1]} subjects the smallest attainable '
-            f'p-value is {p_min:.2e}, which becomes {p_min_adj:.2e} after {method.upper()} correction over '
-            f'{n_hypotheses} tested hypotheses (alpha={alpha}). This is a property of the number of subjects, not of '
-            f'the data: only additional subjects can lower this bound. See minimum_detectable_p for details.'
+            f'This study design cannot detect an isolated effect {scope}. {design}, which becomes {p_min_adj:.2e} '
+            f'after {method.upper()} correction over {n_hypotheses} hypotheses (alpha={alpha}) if a single triple '
+            f'attains it. Because the correction is step-up, significant triples can still occur, but only as a group '
+            f'of at least {k_min} simultaneously significant triples (for example {k_min} triples that separate the '
+            f'conditions perfectly).{caveat} See minimum_detectable_p (rank parameter) for details.',
+            stacklevel=3
         )
 
     def compute_significance(
@@ -621,8 +702,8 @@ class MultiNeuronChatObject:
         :param mask: a mask to specify for which interactions and cell-type pairs the significance should be computed.
         :param n_resamples: number of resamples for permutation fallback (default 10_000 if None)
         :param random_state: random state for reproducibility (default None)
-        :param warn_if_underpowered: whether to warn when the number of subjects is too small for any triple to reach
-                                     significance after correction (default: True)
+        :param warn_if_underpowered: whether to warn when the number of subjects is too small for an isolated triple to
+                                     reach significance after correction, stating whether any triple can (default: True)
         :param correction_method: the multiple-testing correction the p-values are intended for, 'by' or 'bh'
                                   (default: 'by', matching correct_p_values)
         :param alpha: the significance level the p-values are intended to be judged at (default: 0.05)
@@ -649,7 +730,8 @@ class MultiNeuronChatObject:
             self._warn_if_underpowered(
                 n_hypotheses=n_hypotheses,
                 method=correction_method,
-                alpha=alpha
+                alpha=alpha,
+                counted_before_testing=True
             )
 
         if random_state is None:

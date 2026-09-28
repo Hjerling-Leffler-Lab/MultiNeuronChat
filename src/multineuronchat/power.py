@@ -26,7 +26,10 @@ def minimum_detectable_p(
 
     This is a property of the design, not of a particular test or implementation: no effect size, sequencing depth, or
     number of cells per subject can push the p-value below this floor, because subjects - not cells - are the unit of
-    permutation.
+    permutation. The floor binds exact and fully enumerated permutation p-values; asymptotic approximations lie above it.
+    A Monte-Carlo permutation estimate can undercut it when n_resamples is below the size of the reference set but
+    1 / (n_resamples + 1) < p_min (e.g. 8 vs 8 subjects with 10,000 resamples reports 1.0e-04 against p_min = 1.6e-04);
+    this is an artefact of the estimate's resolution, which the Anderson escalation stage removes by enumerating.
 
     If n_hypotheses is provided, the corrected floor is computed as well. With all hypotheses tested at once, the
     Benjamini-Hochberg / Benjamini-Yekutieli step-up adjustment of the rank-th smallest p-value is
@@ -35,7 +38,11 @@ def minimum_detectable_p(
 
     where c(m) = 1 for 'bh' and c(m) = sum_{i=1..m} 1/i for 'by'. rank is the number of hypotheses assumed to attain the
     floor simultaneously: rank=1 is the conservative lone-signal case, larger values describe a pervasive perturbation
-    where many triples separate perfectly and the correction is correspondingly cheaper.
+    where many triples separate perfectly and the correction is correspondingly cheaper. rank=n_hypotheses gives the most
+    favourable case, p_min * c(n_hypotheses): if even that exceeds alpha, no triple can be significant. Otherwise
+    significant triples occur only in groups of at least k_min = ceil(p_min * n_hypotheses * c(n_hypotheses) / alpha),
+    because the step-up rule rejects at rank k only if p_(k) <= k * alpha / (n_hypotheses * c(n_hypotheses)) and every
+    p_(k) is at least p_min.
 
     Note that n_control and n_case are taken separately rather than as a single per-group n, because C(N, k) is maximised
     at the balanced split: 10 vs 10 subjects reach p_min = 1.1e-05, while the same 20 subjects split 2 vs 18 reach only
