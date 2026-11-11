@@ -9,7 +9,7 @@ def minimum_detectable_p(
         n_control: int,
         n_case: int,
         n_hypotheses: Optional[int] = None,
-        method: Optional[str] = 'by',
+        method: Optional[str] = 'bh',
         rank: Optional[int] = 1
 ) -> Tuple[float, float]:
     """
@@ -53,8 +53,8 @@ def minimum_detectable_p(
     :param n_hypotheses: total number of tested hypotheses (source x receiver x interaction triples) used for the
                          multiple-testing correction. If None, only the uncorrected floor is computed and the corrected
                          floor is returned as np.nan.
-    :param method: correction method, either 'by' (Benjamini-Yekutieli, MultiNeuronChat's default) or 'bh'
-                   (Benjamini-Hochberg)
+    :param method: correction method, either 'bh' (Benjamini-Hochberg, MultiNeuronChat's default) or 'by'
+                   (Benjamini-Yekutieli)
     :param rank: rank of the hypothesis in the step-up procedure, i.e. the number of hypotheses assumed to attain the
                  floor (default: 1)
     :return: tuple (p_min, p_min_adj) of the uncorrected and the corrected minimal attainable p-value. p_min_adj is
@@ -120,7 +120,7 @@ def n_relabelings(
 
 def resamples_for_correction(
         n_hypotheses: int,
-        method: Optional[str] = 'by',
+        method: Optional[str] = 'bh',
         alpha: Optional[float] = 0.05
 ) -> int:
     """
@@ -143,8 +143,8 @@ def resamples_for_correction(
     n_relabelings(n_control, n_case), beyond which the reference set is exhausted and the p-value is exact.
 
     :param n_hypotheses: number of tested hypotheses entering the multiple-testing correction (>= 1)
-    :param method: correction method, either 'by' (Benjamini-Yekutieli, MultiNeuronChat's default) or 'bh'
-                   (Benjamini-Hochberg)
+    :param method: correction method, either 'bh' (Benjamini-Hochberg, MultiNeuronChat's default) or 'by'
+                   (Benjamini-Yekutieli)
     :param alpha: the significance level the p-value must be able to reach after correction (default: 0.05)
     :return: the smallest number of resamples at which the corrected Monte-Carlo floor is at most alpha
     """

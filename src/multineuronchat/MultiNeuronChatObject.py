@@ -291,13 +291,14 @@ class MultiNeuronChatObject:
     @staticmethod
     def __correct_p_values(
             p_values: np.ndarray,
-            method: str = 'by'
+            method: str = 'bh'
     ) -> np.ndarray:
         """
-        Correct p-values using the Benjamini-Yekutieli method and return the corrected p-values.
+        Correct p-values using the Benjamini-Hochberg (default) or Benjamini-Yekutieli method and return the corrected
+        p-values.
         Exclude any nan values from the correction.
         :param p_values: the p-values to correct
-        :param method: the method to use for correction (default: 'by')
+        :param method: the method to use for correction (default: 'bh')
         :return: the corrected p-values with nan values where the p-values were nan
         """
         if method not in ['by', 'bh']:
@@ -342,18 +343,18 @@ class MultiNeuronChatObject:
     def correct_p_values(
             self,
             statistical_test: Optional[Union[str, List[str]]] = None,
-            method: str = 'by',
+            method: str = 'bh',
             alpha: float = 0.05,
             warn_if_underpowered: bool = True
     ) -> Union[xr.DataArray, Dict[str, xr.DataArray]]:
         """
-        This function corrects the p-values using the Benjamini-Yekutieli method. The corrected p-values are stored in
-        the MultiNeuronChatObject. If statistical_test is None, all p-values are corrected. If statistical_test is a
-        string, only the p-values of the specified test are corrected. If statistical_test is a list of strings, only
-        the p-values of the specified tests are corrected.
+        This function corrects the p-values using the Benjamini-Hochberg (default) or Benjamini-Yekutieli method. The
+        corrected p-values are stored in the MultiNeuronChatObject. If statistical_test is None, all p-values are
+        corrected. If statistical_test is a string, only the p-values of the specified test are corrected. If
+        statistical_test is a list of strings, only the p-values of the specified tests are corrected.
 
         :param statistical_test: the test for which the p-values should be corrected
-        :param method: the method to use for correction (default: 'by')
+        :param method: the method to use for correction (default: 'bh')
         :param alpha: the significance level assumed by the power check; it does not threshold the output (default: 0.05)
         :param warn_if_underpowered: whether to warn, per test, when the number of subjects is too small for an isolated
                                      triple to reach significance over the triples that returned a p-value. Unlike the
@@ -548,7 +549,7 @@ class MultiNeuronChatObject:
     def _resample_budget(
             self,
             n_hypotheses: int,
-            method: str = 'by',
+            method: str = 'bh',
             alpha: float = 0.05
     ) -> int:
         """
@@ -583,7 +584,7 @@ class MultiNeuronChatObject:
     def _warn_if_underpowered(
             self,
             n_hypotheses: int,
-            method: str = 'by',
+            method: str = 'bh',
             alpha: float = 0.05,
             counted_before_testing: bool = False
     ) -> None:
@@ -603,7 +604,7 @@ class MultiNeuronChatObject:
         Both statements are arithmetic on the correction and hold under any dependence between the triples.
 
         :param n_hypotheses: the number of hypotheses m entering the multiple-testing correction
-        :param method: the correction method assumed for the check (default: 'by', matching correct_p_values)
+        :param method: the correction method assumed for the check (default: 'bh', matching correct_p_values)
         :param alpha: the significance level assumed for the check (default: 0.05)
         :param counted_before_testing: True if n_hypotheses counts the triples selected for testing rather than those
                                        that returned a p-value. Triples returning NaN do not enter the correction and
@@ -681,7 +682,7 @@ class MultiNeuronChatObject:
             n_resamples: Optional[int] = 10_000,
             random_state: Optional[int] = None,
             warn_if_underpowered: Optional[bool] = True,
-            correction_method: Optional[str] = 'by',
+            correction_method: Optional[str] = 'bh',
             alpha: Optional[float] = 0.05,
             escalate_permutation: Optional[bool] = True
     ) -> xr.DataArray:
@@ -705,7 +706,7 @@ class MultiNeuronChatObject:
         :param warn_if_underpowered: whether to warn when the number of subjects is too small for an isolated triple to
                                      reach significance after correction, stating whether any triple can (default: True)
         :param correction_method: the multiple-testing correction the p-values are intended for, 'by' or 'bh'
-                                  (default: 'by', matching correct_p_values)
+                                  (default: 'bh', matching correct_p_values)
         :param alpha: the significance level the p-values are intended to be judged at (default: 0.05)
         :param escalate_permutation: whether to re-run triples whose permutation p-value is pinned at the Monte-Carlo
                                      floor with the deeper resample budget the correction requires (default: True).
@@ -894,7 +895,7 @@ class MultiNeuronChatObject:
             n_resamples: Optional[int] = 10_000,
             random_state: Optional[int] = None,
             escalate_permutation: Optional[bool] = True,
-            correction_method: Optional[str] = 'by',
+            correction_method: Optional[str] = 'bh',
             alpha: Optional[float] = 0.05
     ) -> xr.DataArray:
         """

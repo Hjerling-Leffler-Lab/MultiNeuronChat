@@ -84,8 +84,8 @@ pvals = mnc.compute_significance(
     random_state=42
 )
 
-# 5) Control FDR (Benjamini–Yekutieli by default; use "bh" for Benjamini–Hochberg)
-pvals_adj = mnc.correct_p_values(statistical_test="KS", method="by")
+# 5) Control FDR (Benjamini–Hochberg by default; use "by" for Benjamini–Yekutieli)
+pvals_adj = mnc.correct_p_values(statistical_test="KS", method="bh")
 ```
 
 
@@ -114,7 +114,7 @@ p_min, p_min_adj = minimum_detectable_p(
     n_control=n_control,
     n_case=n_case,
     n_hypotheses=n_cell_types * n_cell_types * n_interactions,
-    method="by"              # "by" (default) or "bh"
+    method="bh"              # "bh" (default) or "by"
 )
 
 print(f"Smallest attainable p-value: {p_min:.2e} -> {p_min_adj:.2e} after correction")
@@ -149,10 +149,10 @@ mnc.compute_significance(
     mask=mask,
     n_resamples=10_000,      # first stage
     random_state=42,         # makes the escalation reproducible
-    correction_method="by",  # default; sizes the second stage
+    correction_method="bh",  # default; sizes the second stage
     alpha=0.05,              # default; sizes the second stage
 )
-mnc.correct_p_values(statistical_test="Anderson", method="by")
+mnc.correct_p_values(statistical_test="Anderson", method="bh")
 ```
 
 `correction_method` and `alpha` describe the correction the p-values are *destined* for — they do not
