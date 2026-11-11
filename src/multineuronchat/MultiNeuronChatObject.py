@@ -677,7 +677,7 @@ class MultiNeuronChatObject:
 
     def compute_significance(
             self,
-            statistical_test: Optional[str] = 'KS',
+            statistical_test: Optional[str] = 'CVM',
             mask: Optional[Union[np.ndarray, xr.DataArray]] = None,
             n_resamples: Optional[int] = 10_000,
             random_state: Optional[int] = None,
@@ -699,7 +699,7 @@ class MultiNeuronChatObject:
         needs to be provided unless a different correction is intended. If they understate the eventual correction the
         result is conservative, never invalid: the p-values are merely resampled less deeply than they could have been.
 
-        :param statistical_test: the statistical test to compute the p-values for (default: 'KS', i.e. Kolmogorov-Smirnov).
+        :param statistical_test: the statistical test to compute the p-values for (default: 'CVM', i.e. Cramér-von Mises).
         :param mask: a mask to specify for which interactions and cell-type pairs the significance should be computed.
         :param n_resamples: number of resamples for permutation fallback (default 10_000 if None)
         :param random_state: random state for reproducibility (default None)

@@ -583,7 +583,7 @@ def plot_aula_medica_plot(
         axs: plt.Axes,
         mnc_object: MultiNeuronChatObject,
         wasserstein_distance_matrix: xr.DataArray,
-        statistical_test: str = 'KS',
+        statistical_test: str = 'CVM',
         use_adjusted_p_values: bool = True,
         cell_types: list[str] | list[tuple[str, list[str]]] | None = None,
         cell_type_labels_short: dict[str, str] | None = None,
