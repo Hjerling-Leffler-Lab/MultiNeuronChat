@@ -23,18 +23,14 @@ def compute_wasserstein_mask(
     dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'.
 
     .. deprecated::
-        Deprecated as a prefilter for significance testing and will be removed. The Wasserstein distance measures the
-        between-condition separation that the statistical tests are themselves testing for, and is analytically linked
-        to the Kolmogorov-Smirnov statistic, so selecting on it biases the retained p-values downward under the null
-        (Bourgon, Gentleman & Huber 2010). Measured under the global null at 12 vs 12 subjects, keeping the top 10 % of
-        triples raises the KS rejection rate at alpha = 0.05 from 0.030 to 0.087, a 2.9-fold inflation. Use
-        compute_variance_mask instead, which is label-blind and therefore exactly independent of the tests.
+        All masks are deprecated and will be removed in a future release; call compute_significance without a mask
+        instead. This mask is in addition not a valid prefilter: the Wasserstein distance measures the between-condition
+        separation that the statistical tests are themselves testing for, and is analytically linked to the
+        Kolmogorov-Smirnov statistic, so selecting on it biases the retained p-values downward under the null (Bourgon,
+        Gentleman & Huber 2010). Measured under the global null at 12 vs 12 subjects, keeping the top 10 % of triples
+        raises the KS rejection rate at alpha = 0.05 from 0.030 to 0.087, a 2.9-fold inflation.
 
-        The distances themselves remain valid for exploratory ranking and visualisation - request them with
-        return_wasserstein_distances=True and use them for ordering or plotting rather than for selecting hypotheses to
-        test.
-
-    See also: compute_earth_mover_mask, compute_variance_mask
+    See also: compute_earth_mover_mask
 
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param top_n: The number of hypotheses with the largest Wasserstein distances that should be included in the mask.
@@ -49,7 +45,9 @@ def compute_wasserstein_mask(
     :return: A boolean xarray DataArray with dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'
              or a tuple with the mask and the Wasserstein distances as xarray DataArrays
     """
-    return compute_earth_mover_mask(
+    _warn_mask_deprecated('compute_wasserstein_mask', reads_labels=True)
+
+    return _compute_earth_mover_mask(
         mnc_object=mnc_object,
         top_n=top_n,
         top_percentile=top_percentile,
@@ -75,9 +73,8 @@ def compute_earth_mover_mask(
     dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'.
 
     .. deprecated::
-        Deprecated as a prefilter for significance testing and will be removed - see compute_wasserstein_mask for why,
-        and compute_variance_mask for the label-blind replacement. The distances remain valid for exploratory ranking
-        and visualisation.
+        Deprecated and will be removed in a future release, like all masks; call compute_significance without a mask
+        instead. See compute_wasserstein_mask for why this mask is in addition not a valid prefilter.
 
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param top_n: The number of hypotheses with the largest Wasserstein distances that should be included in the mask.
@@ -91,6 +88,32 @@ def compute_earth_mover_mask(
     :param return_wasserstein_distances: If True, the computed Wasserstein distances are returned as well.
     :return: A boolean xarray DataArray with dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'
              or a tuple with the mask and the Wasserstein distances as xarray DataArrays
+    """
+    _warn_mask_deprecated('compute_earth_mover_mask', reads_labels=True)
+
+    return _compute_earth_mover_mask(
+        mnc_object=mnc_object,
+        top_n=top_n,
+        top_percentile=top_percentile,
+        p=p,
+        normalized=normalized,
+        exclude_zero_distributions=exclude_zero_distributions,
+        return_wasserstein_distances=return_wasserstein_distances
+    )
+
+
+def _compute_earth_mover_mask(
+    mnc_object: MultiNeuronChatObject,
+    top_n: Optional[int] = None,
+    top_percentile: Optional[float] = None,
+    p: Optional[float] = 1.0,
+    normalized: Optional[bool] = False,
+    exclude_zero_distributions: Optional[bool] = True,
+    return_wasserstein_distances: Optional[bool] = False
+) -> Union[xr.DataArray, Tuple[xr.DataArray, xr.DataArray]]:
+    """
+    Implementation of compute_earth_mover_mask, shared with compute_wasserstein_mask so that each public call issues a
+    single deprecation warning attributed to the caller.
     """
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
@@ -108,15 +131,6 @@ def compute_earth_mover_mask(
 
     if p <= 0:
         raise ValueError('p must be a positive value!')
-
-    warnings.warn(
-        'compute_wasserstein_mask / compute_earth_mover_mask are deprecated as prefilters for significance testing: '
-        'the distance is not independent of the test statistics under the null hypothesis, so passing the returned '
-        'mask to compute_significance biases the retained p-values downward. Use compute_variance_mask instead. The '
-        'distances themselves remain valid for exploratory ranking and visualisation.',
-        DeprecationWarning,
-        stacklevel=2
-    )
 
     # Compute the Wasserstein distance between the distributions of the communication scores for each hypothesis
     wasserstein_distances = np.ones((n_source_cell_types, n_receiver_cell_types, n_interaction_types)) * np.nan
@@ -170,6 +184,11 @@ def compute_variance_mask(
     """
     Compute a label-blind mask that keeps the hypotheses whose communication scores vary the most across subjects.
 
+    .. deprecated::
+        All masks are deprecated and will be removed in a future release; call compute_significance without a mask
+        instead. This mask is label-blind and therefore a valid prefilter, but in the simulation benchmark it did not
+        improve on testing all hypotheses.
+
     The variance is computed over the subjects of *both* conditions pooled into a single sample, with the condition
     labels discarded. Every statistical test used by MultiNeuronChat is
     a function T(x, z) of the pooled scores x and the condition labels z. Under the null hypothesis the labels are
@@ -219,6 +238,8 @@ def compute_variance_mask(
     :return: A boolean xarray DataArray with dimensions 'source', 'receiver' and 'interaction', or a tuple of the mask
              and the variances as xarray DataArrays
     """
+    _warn_mask_deprecated('compute_variance_mask')
+
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
 
@@ -293,6 +314,11 @@ def compute_abundance_mask(
     """
     Compute a label-blind mask that keeps the hypotheses whose bottleneck abundance is largest across subjects.
 
+    .. deprecated::
+        All masks are deprecated and will be removed in a future release; call compute_significance without a mask
+        instead. This mask is label-blind and therefore a valid prefilter, but in the simulation benchmark it did not
+        improve on testing all hypotheses.
+
     For each triple (source, receiver, interaction), the bottleneck abundance is defined as
 
         min(pooled_mean_ligand[source, interaction], pooled_mean_target[receiver, interaction])
@@ -318,7 +344,7 @@ def compute_abundance_mask(
     pooled subjects — those are untestable and already return NaN from compute_significance, so removing them reduces
     the multiple-testing burden for free without discarding any testable hypothesis.
 
-    See also: compute_variance_mask, compute_pooled_threshold_mask
+    See also: compute_variance_mask, compute_pooled_threshold_communication_score_mask
 
     :param mnc_object: A MultiNeuronChatObject containing the computed communication scores
     :param top_n: The number of hypotheses with the largest bottleneck abundance to include in the mask.
@@ -330,6 +356,8 @@ def compute_abundance_mask(
     :return: A boolean xarray DataArray with dimensions 'source', 'receiver' and 'interaction', or a tuple of the
              mask and the bottleneck abundances as xarray DataArrays
     """
+    _warn_mask_deprecated('compute_abundance_mask')
+
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
 
@@ -403,26 +431,17 @@ def compute_threshold_communication_score_mask(
     'receiver_cell_type', and 'interaction_type'.
 
     .. deprecated::
-        This function checks the threshold requirement separately per condition, which means the selection depends on
-        the condition labels. A filter that reads the labels is not independent of the test statistics under the null
-        hypothesis (Bourgon, Gentleman & Huber 2010), and the same criticism that applies to
-        compute_wasserstein_mask applies here. Use compute_pooled_threshold_mask instead: it pools subjects from both
-        conditions before counting, so the selection is a symmetric function of the pooled sample and is therefore
-        exactly label-blind.
+        All masks are deprecated and will be removed in a future release; call compute_significance without a mask
+        instead. This mask is in addition not a valid prefilter: it checks the threshold requirement separately per
+        condition, so the selection depends on the condition labels and is not independent of the test statistics under
+        the null hypothesis (Bourgon, Gentleman & Huber 2010).
 
     :param mnc_object: A MultiNeuronChatObject containing the communication scores
     :param n_samples: The number of samples from each condition that must have a communication score higher than the threshold.
     :param threshold: The threshold that the communication score must exceed.
     :return: A boolean xarray DataArray with dimensions 'source_cell_type', 'receiver_cell_type', and 'interaction_type'
     """
-    warnings.warn(
-        'compute_threshold_communication_score_mask is deprecated: it evaluates the threshold condition separately '
-        'per condition, so the filter depends on the condition labels and is not independent of the test statistics '
-        'under the null (Bourgon, Gentleman & Huber 2010). Use compute_pooled_threshold_mask instead, which pools '
-        'subjects from both conditions before counting and is therefore exactly label-blind.',
-        DeprecationWarning,
-        stacklevel=2
-    )
+    _warn_mask_deprecated('compute_threshold_communication_score_mask', reads_labels=True)
 
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
@@ -471,6 +490,11 @@ def compute_pooled_threshold_communication_score_mask(
     Compute a label-blind mask that keeps hypotheses where at least n_samples subjects in the pooled
     (both-condition) sample have a communication score strictly greater than threshold.
 
+    .. deprecated::
+        All masks are deprecated and will be removed in a future release; call compute_significance without a mask
+        instead. This mask is label-blind and therefore a valid prefilter, but in the simulation benchmark it did not
+        improve on testing all hypotheses.
+
     The subjects of both conditions are pooled into a single sample before the threshold is applied,
     so the condition labels are never read. This makes the filter a symmetric function of the pooled
     sample, and therefore exactly independent of the test statistics under the null hypothesis: every
@@ -497,6 +521,8 @@ def compute_pooled_threshold_communication_score_mask(
                       this value. Default: 0.0.
     :return: A boolean xarray DataArray with dimensions 'source', 'receiver', and 'interaction'
     """
+    _warn_mask_deprecated('compute_pooled_threshold_communication_score_mask')
+
     if mnc_object is None:
         raise ValueError('A MultiNeuronChatObject must be provided')
 
@@ -528,6 +554,38 @@ def compute_pooled_threshold_communication_score_mask(
 ########################################################################################################################
 # Helper functions
 ########################################################################################################################
+
+def _warn_mask_deprecated(
+        function_name: str,
+        reads_labels: bool = False
+) -> None:
+    """
+    Issue the deprecation warning shared by all mask functions.
+
+    Prefiltering is deprecated as a whole: in the simulation benchmark none of the masks improved on testing all
+    hypotheses. Masks that read the condition labels are additionally flagged as invalid prefilters. FutureWarning is
+    used rather than DeprecationWarning because the latter is hidden by default unless raised from __main__, and the
+    warning is aimed at end users rather than at developers of downstream libraries.
+
+    :param function_name: the public mask function being called
+    :param reads_labels: whether the mask depends on the condition labels and is therefore not independent of the test
+                         statistics under the null hypothesis
+    """
+    message: str = (
+        f'{function_name} is deprecated and will be removed in a future release. Prefiltering hypotheses with a mask is '
+        f'no longer recommended: in the simulation benchmark no mask improved on testing all hypotheses. Call '
+        f'compute_significance without a mask instead.'
+    )
+
+    if reads_labels:
+        message += (
+            ' This mask also depends on the condition labels, so it is not independent of the test statistics under the '
+            'null hypothesis and biases the retained p-values downward (Bourgon, Gentleman & Huber 2010).'
+        )
+
+    # stacklevel=3 attributes the warning to the caller of the public mask function
+    warnings.warn(message, FutureWarning, stacklevel=3)
+
 
 def _validate_selection(
         top_n: Optional[int],

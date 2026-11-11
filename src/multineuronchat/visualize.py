@@ -463,6 +463,10 @@ def plot_wasserstein_ranked_differential_communication_circle_plot(
     """
     Create a circle plot showing the top N interactions between different cell-types based on Wasserstein distances.
 
+    .. deprecated::
+        Deprecated and will be removed in a future release, together with compute_wasserstein_mask that produces its
+        input. Use plot_p_value_differential_communication_circle_plot to show the significance test results instead.
+
     :param axs: Matplotlib Axes object where the circle plot will be drawn.
     :param wasserstein_distances: xarray DataArray containing the Wasserstein distances between cell-types.
     :param top_n_edges: Number of top interactions (edges) to display in the plot (default: 10).
@@ -490,6 +494,14 @@ def plot_wasserstein_ranked_differential_communication_circle_plot(
 
     :return: None
     """
+    warnings.warn(
+        'plot_wasserstein_ranked_differential_communication_circle_plot is deprecated and will be removed in a future '
+        'release, together with compute_wasserstein_mask that produces its input. Use '
+        'plot_p_value_differential_communication_circle_plot to show the significance test results instead.',
+        FutureWarning,
+        stacklevel=2
+    )
+
     if cell_types is None:
         # Get the number of cell-types
         cell_types: list[str] = list(set(wasserstein_distances.coords['source'].values.tolist()).union(
