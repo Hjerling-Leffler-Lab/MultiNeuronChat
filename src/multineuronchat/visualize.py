@@ -611,6 +611,11 @@ def plot_aula_medica_plot(
     """
     Create an Aula Medica plot showing the Wasserstein distances and p-values for differential communication analysis.
 
+    .. deprecated::
+        Deprecated and will be removed in a future release, together with compute_wasserstein_mask that produces its
+        wasserstein_distance_matrix input. Use plot_p_value_differential_communication_circle_plot to show the
+        significance test results instead.
+
     :param axs: Matplotlib Axes object where the Aula Medica plot will be drawn.
     :param mnc_object: MultiNeuronChatObject containing the p-values for differential communication analysis.
     :param wasserstein_distance_matrix: xarray DataArray containing the Wasserstein distances between cell-types.
@@ -641,6 +646,14 @@ def plot_aula_medica_plot(
 
     :return: None
     """
+    warnings.warn(
+        'plot_aula_medica_plot is deprecated and will be removed in a future release, together with '
+        'compute_wasserstein_mask that produces its wasserstein_distance_matrix input. Use '
+        'plot_p_value_differential_communication_circle_plot to show the significance test results instead.',
+        FutureWarning,
+        stacklevel=2
+    )
+
     # If no cell-types are provided -> use all cell-types
     all_cell_types: list[str] = list(set(mnc_object.source_cell_types + mnc_object.receiver_cell_types))
     all_cell_types.sort()

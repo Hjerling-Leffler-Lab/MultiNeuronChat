@@ -272,7 +272,8 @@ This release accompanies the revised manuscript.
   the test considerably slower.
 - **Reproducibility.** The subject order is now deterministic, and `compute_significance` warns when
   `random_state=None` could make permutation p-values non-reproducible.
-- **All masks are deprecated** (see above), as is `plot_wasserstein_ranked_differential_communication_circle_plot`.
+- **All masks are deprecated** (see above), as are the plots built on Wasserstein distances,
+  `plot_wasserstein_ranked_differential_communication_circle_plot` and `plot_aula_medica_plot`.
 
 ## Citation
 
